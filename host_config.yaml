@@ -1,60 +1,78 @@
 ---
-- name: "Hostname ve /etc/hosts Düzelt"
+- name: "Hostname ve /etc/hosts Zorla Düzelt"
   hosts: all
   become: true
 
   vars:
     node_map:
-      "10.134.16.63": "apm-test-master01.blt.vc"
-      "10.134.16.64": "apm-test-master02.blt.vc"
-      "10.134.16.65": "apm-test-master03.blt.vc"
-      "10.134.16.66": "apm-test-worker01.blt.vc"
-      "10.134.16.67": "apm-test-worker02.blt.vc"
-      "10.134.16.68": "apm-test-worker03.blt.vc"
+      "10.134.16.63": { fqdn: "apm-test-master01.blt.vc", short: "apm-test-master01" }
+      "10.134.16.64": { fqdn: "apm-test-master02.blt.vc", short: "apm-test-master02" }
+      "10.134.16.65": { fqdn: "apm-test-master03.blt.vc", short: "apm-test-master03" }
+      "10.134.16.66": { fqdn: "apm-test-worker01.blt.vc", short: "apm-test-worker01" }
+      "10.134.16.67": { fqdn: "apm-test-worker02.blt.vc", short: "apm-test-worker02" }
+      "10.134.16.68": { fqdn: "apm-test-worker03.blt.vc", short: "apm-test-worker03" }
 
-    k8s_vip: "10.134.16.69"      # ← Gerçek VIP adresin
-    k8s_dns: "apmtest.blt.vc"  # ← Gerçek DNS kaydın
-
-    correct_hosts:
-      - { ip: "10.134.16.63", name: "master-1" }
-      - { ip: "10.134.16.64", name: "master-2" }
-      - { ip: "10.134.16.65", name: "master-3" }
-      - { ip: "10.134.16.66", name: "worker-1" }
-      - { ip: "10.134.16.67", name: "worker-2" }
-      - { ip: "10.134.16.68", name: "worker-3" }
+    k8s_vip: "10.134.16.69"
+    k8s_dns:  "apmtest.blt.vc"
 
   tasks:
 
-    - name: "Hostname ayarla (IP'ye göre)"
-      hostname:
-        name: "{{ node_map[ansible_host] }}"
+    # ---------- Hostname ----------
+    - name: "FQDN hostname ayarla"
+      shell: |
+        hostnamectl set-hostname "{{ node_map[ansible_host].fqdn }}"
+      changed_when: true
 
-    - name: "Eski 192.168.1.x entries'leri temizle"
-      lineinfile:
-        path: /etc/hosts
-        regexp: "192\\.168\\.1\\."
-        state: absent
+    # ---------- /etc/hosts — eski satırları zorla sil ----------
+    - name: "Eski 10.134.16.6x satırlarını tamamen temizle"
+      shell: |
+        sed -i '/^10\.134\.16\.6[3-9]/d' /etc/hosts
+      changed_when: true
 
-    - name: "Doğru IP'lerle /etc/hosts güncelle"
-      lineinfile:
-        path: /etc/hosts
-        line: "{{ item.ip }}  {{ item.name }}"
-        state: present
-        regexp: ".*{{ item.name }}$"
-      loop: "{{ correct_hosts }}"
+    - name: "Eski 127.0.1.1 satırını temizle"
+      shell: |
+        sed -i '/^127\.0\.1\.1/d' /etc/hosts
+      changed_when: true
 
-    - name: "VIP + DNS ekle"
-      lineinfile:
-        path: /etc/hosts
-        line: "{{ k8s_vip }}  {{ k8s_dns }}"
-        state: present
-        regexp: ".*{{ k8s_dns }}$"
+    - name: "Eski 192.168.1.x satırlarını temizle"
+      shell: |
+        sed -i '/^192\.168\.1\./d' /etc/hosts
+      changed_when: true
 
-    - name: "Sonuç doğrula"
+    # ---------- /etc/hosts — doğru içeriği yaz ----------
+    - name: "127.0.1.1 satırını FQDN ile ekle"
+      shell: |
+        echo "127.0.1.1 {{ node_map[ansible_host].fqdn }} {{ node_map[ansible_host].short }}" >> /etc/hosts
+      changed_when: true
+
+    - name: "Tüm node FQDN entry'lerini ekle"
+      shell: |
+        cat >> /etc/hosts << 'EOF'
+        10.134.16.63  apm-test-master01.blt.vc  apm-test-master01
+        10.134.16.64  apm-test-master02.blt.vc  apm-test-master02
+        10.134.16.65  apm-test-master03.blt.vc  apm-test-master03
+        10.134.16.66  apm-test-worker01.blt.vc  apm-test-worker01
+        10.134.16.67  apm-test-worker02.blt.vc  apm-test-worker02
+        10.134.16.68  apm-test-worker03.blt.vc  apm-test-worker03
+        10.134.16.69  apmtest.blt.vc
+        EOF
+      changed_when: true
+
+    # ---------- Doğrulama ----------
+    - name: "Hostname kontrol"
+      command: hostname --fqdn
+      register: fqdn_out
+      changed_when: false
+
+    - name: "Hostname sonucu"
+      debug:
+        msg: "HOSTNAME: {{ fqdn_out.stdout }}"
+
+    - name: "/etc/hosts içeriği"
       command: cat /etc/hosts
       register: hosts_out
       changed_when: false
 
-    - name: "/etc/hosts içeriği"
+    - name: "Hosts dosyası"
       debug:
         var: hosts_out.stdout_lines
