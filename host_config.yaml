@@ -1,0 +1,60 @@
+---
+- name: "Hostname ve /etc/hosts Düzelt"
+  hosts: all
+  become: true
+
+  vars:
+    node_map:
+      "10.134.16.63": "apm-test-master01.blt.vc"
+      "10.134.16.64": "apm-test-master02.blt.vc"
+      "10.134.16.65": "apm-test-master03.blt.vc"
+      "10.134.16.66": "apm-test-worker01.blt.vc"
+      "10.134.16.67": "apm-test-worker02.blt.vc"
+      "10.134.16.68": "apm-test-worker03.blt.vc"
+
+    k8s_vip: "10.134.16.69"      # ← Gerçek VIP adresin
+    k8s_dns: "apmtest.blt.vc"  # ← Gerçek DNS kaydın
+
+    correct_hosts:
+      - { ip: "10.134.16.63", name: "master-1" }
+      - { ip: "10.134.16.64", name: "master-2" }
+      - { ip: "10.134.16.65", name: "master-3" }
+      - { ip: "10.134.16.66", name: "worker-1" }
+      - { ip: "10.134.16.67", name: "worker-2" }
+      - { ip: "10.134.16.68", name: "worker-3" }
+
+  tasks:
+
+    - name: "Hostname ayarla (IP'ye göre)"
+      hostname:
+        name: "{{ node_map[ansible_host] }}"
+
+    - name: "Eski 192.168.1.x entries'leri temizle"
+      lineinfile:
+        path: /etc/hosts
+        regexp: "192\\.168\\.1\\."
+        state: absent
+
+    - name: "Doğru IP'lerle /etc/hosts güncelle"
+      lineinfile:
+        path: /etc/hosts
+        line: "{{ item.ip }}  {{ item.name }}"
+        state: present
+        regexp: ".*{{ item.name }}$"
+      loop: "{{ correct_hosts }}"
+
+    - name: "VIP + DNS ekle"
+      lineinfile:
+        path: /etc/hosts
+        line: "{{ k8s_vip }}  {{ k8s_dns }}"
+        state: present
+        regexp: ".*{{ k8s_dns }}$"
+
+    - name: "Sonuç doğrula"
+      command: cat /etc/hosts
+      register: hosts_out
+      changed_when: false
+
+    - name: "/etc/hosts içeriği"
+      debug:
+        var: hosts_out.stdout_lines
