@@ -1,0 +1,329 @@
+---
+# ============================================================
+#  LVM PRE-CHECK PLAYBOOK — SADECE OKUR, HİÇBİR ŞEY OLUŞTURMAZ
+#  Tüm çıktılar ekrana basılır.
+#  Bu playbook onaylandıktan sonra lvm_setup.yml çalıştırılacak.
+# ============================================================
+
+# ============================================================
+# MASTER NODES — Pre-Check
+# ============================================================
+- name: "MASTER PRE-CHECK — sdb disk ve mevcut durum kontrolü"
+  hosts: masters
+  become: true
+  gather_facts: false
+
+  vars:
+    disk_sdb: /dev/sdb
+    vg_name: vg_sdb
+    expected_disk_gb: 200
+
+    planned_volumes:
+      - lv: lv_kubelet
+        size: "70 GB"
+        mount: /var/lib/kubelet
+        fstype: xfs
+      - lv: lv_containerd
+        size: "110 GB"
+        mount: /var/lib/containerd
+        fstype: xfs
+      - lv: lv_log
+        size: "~20 GB (kalan alan)"
+        mount: /var/log
+        fstype: xfs
+
+  tasks:
+
+    - name: "════════════════════════════════════════"
+      debug:
+        msg: "HOST: {{ inventory_hostname }} — MASTER PRE-CHECK BAŞLIYOR"
+
+    # ---------- sdb var mı? ----------
+    - name: "sdb diski mevcut mu?"
+      stat:
+        path: "{{ disk_sdb }}"
+      register: sdb_stat
+
+    - name: "sdb durumu"
+      debug:
+        msg: >-
+          {{ disk_sdb }} →
+          {% if sdb_stat.stat.exists %}✅ DİSK MEVCUT{% else %}❌ DİSK BULUNAMADI — PLAYBOOK ÇALIŞMAZ!{% endif %}
+
+    # ---------- sdb boyutu ----------
+    - name: "sdb disk boyutunu oku"
+      command: "lsblk -bno SIZE {{ disk_sdb }}"
+      register: sdb_size_bytes
+      changed_when: false
+      when: sdb_stat.stat.exists
+
+    - name: "sdb boyut kontrolü"
+      debug:
+        msg: >-
+          {{ disk_sdb }} boyutu →
+          {{ (sdb_size_bytes.stdout | int / 1073741824) | round(1) }} GB
+          {% if (sdb_size_bytes.stdout | int / 1073741824) >= expected_disk_gb %}
+          ✅ Yeterli alan (beklenen: {{ expected_disk_gb }} GB)
+          {% else %}
+          ❌ Yetersiz alan! (beklenen: {{ expected_disk_gb }} GB)
+          {% endif %}
+      when: sdb_stat.stat.exists
+
+    # ---------- sdb üzerinde mevcut partition/vg var mı? ----------
+    - name: "sdb üzerinde mevcut VG/PV kontrolü"
+      command: "pvs --noheadings -o pv_name,vg_name {{ disk_sdb }}"
+      register: sdb_pvs
+      changed_when: false
+      failed_when: false
+      when: sdb_stat.stat.exists
+
+    - name: "sdb mevcut PV/VG durumu"
+      debug:
+        msg: >-
+          {{ disk_sdb }} üzerinde mevcut PV/VG →
+          {% if sdb_pvs.stdout | trim == '' %}
+          ✅ Temiz disk, VG yok — kurulum yapılabilir
+          {% else %}
+          ⚠️  UYARI: Disk zaten kullanımda! → {{ sdb_pvs.stdout | trim }}
+          {% endif %}
+      when: sdb_stat.stat.exists
+
+    # ---------- mount noktaları dolu mu? ----------
+    - name: "Mevcut mount noktalarını kontrol et"
+      command: "mountpoint -q {{ item.mount }}"
+      register: mount_check
+      changed_when: false
+      failed_when: false
+      loop: "{{ planned_volumes }}"
+
+    - name: "Mount noktası durumları"
+      debug:
+        msg: >-
+          {{ item.item.mount }} →
+          {% if item.rc == 0 %}
+          ⚠️  UYARI: Zaten mount edilmiş!
+          {% else %}
+          ✅ Boş — mount edilebilir
+          {% endif %}
+      loop: "{{ mount_check.results }}"
+
+    # ---------- Kurulum planı ----------
+    - name: "Kurulum Planı (MASTER — sdb)"
+      debug:
+        msg:
+          - "══════════════════════════════════════════════"
+          - "  KURULUM PLANI — {{ inventory_hostname }}"
+          - "══════════════════════════════════════════════"
+          - "  Disk      : {{ disk_sdb }}"
+          - "  VG Adı    : {{ vg_name }}"
+          - "──────────────────────────────────────────────"
+          - "  LV              | Boyut       | Mount               | FS"
+          - "  lv_kubelet      | 70 GB       | /var/lib/kubelet    | xfs"
+          - "  lv_containerd   | 110 GB      | /var/lib/containerd | xfs"
+          - "  lv_log          | ~20 GB      | /var/log            | xfs"
+          - "══════════════════════════════════════════════"
+
+    # ---------- Mevcut disk durumu ----------
+    - name: "Mevcut genel disk durumu (df -hT)"
+      command: df -hT
+      register: df_out
+      changed_when: false
+
+    - name: "Mevcut disk kullanımı"
+      debug:
+        var: df_out.stdout_lines
+
+    - name: "lsblk — tüm diskler"
+      command: lsblk -o NAME,SIZE,TYPE,MOUNTPOINT,FSTYPE
+      register: lsblk_out
+      changed_when: false
+
+    - name: "Disk yapısı"
+      debug:
+        var: lsblk_out.stdout_lines
+
+
+# ============================================================
+# WORKER NODES — Pre-Check
+# ============================================================
+- name: "WORKER PRE-CHECK — sdb + sdc disk ve mevcut durum kontrolü"
+  hosts: workers
+  become: true
+  gather_facts: false
+
+  vars:
+    disk_sdb: /dev/sdb
+    disk_sdc: /dev/sdc
+    vg_sdb: vg_sdb
+    vg_sdc: vg_sdc
+    expected_disk_gb: 200
+
+    planned_volumes_sdb:
+      - lv: lv_kubelet
+        size: "70 GB"
+        mount: /var/lib/kubelet
+        fstype: xfs
+      - lv: lv_containerd
+        size: "110 GB"
+        mount: /var/lib/containerd
+        fstype: xfs
+      - lv: lv_log
+        size: "~20 GB (kalan)"
+        mount: /var/log
+        fstype: xfs
+
+    planned_volumes_sdc:
+      - lv: lv_wal
+        size: "200 GB (tümü)"
+        mount: /data/wal
+        fstype: xfs
+
+  tasks:
+
+    - name: "════════════════════════════════════════"
+      debug:
+        msg: "HOST: {{ inventory_hostname }} — WORKER PRE-CHECK BAŞLIYOR"
+
+    # ---------- sdb ----------
+    - name: "sdb diski mevcut mu?"
+      stat:
+        path: "{{ disk_sdb }}"
+      register: sdb_stat
+
+    - name: "sdb durumu"
+      debug:
+        msg: >-
+          {{ disk_sdb }} →
+          {% if sdb_stat.stat.exists %}✅ DİSK MEVCUT{% else %}❌ DİSK BULUNAMADI!{% endif %}
+
+    - name: "sdb boyutunu oku"
+      command: "lsblk -bno SIZE {{ disk_sdb }}"
+      register: sdb_size
+      changed_when: false
+      when: sdb_stat.stat.exists
+
+    - name: "sdb boyut kontrolü"
+      debug:
+        msg: >-
+          {{ disk_sdb }} →
+          {{ (sdb_size.stdout | int / 1073741824) | round(1) }} GB
+          {% if (sdb_size.stdout | int / 1073741824) >= expected_disk_gb %}✅ Yeterli{% else %}❌ Yetersiz!{% endif %}
+      when: sdb_stat.stat.exists
+
+    - name: "sdb üzerinde mevcut PV/VG kontrolü"
+      command: "pvs --noheadings -o pv_name,vg_name {{ disk_sdb }}"
+      register: sdb_pvs
+      changed_when: false
+      failed_when: false
+      when: sdb_stat.stat.exists
+
+    - name: "sdb PV/VG durumu"
+      debug:
+        msg: >-
+          {{ disk_sdb }} →
+          {% if sdb_pvs.stdout | trim == '' %}✅ Temiz disk{% else %}⚠️  Kullanımda: {{ sdb_pvs.stdout | trim }}{% endif %}
+      when: sdb_stat.stat.exists
+
+    # ---------- sdc ----------
+    - name: "sdc diski mevcut mu?"
+      stat:
+        path: "{{ disk_sdc }}"
+      register: sdc_stat
+
+    - name: "sdc durumu"
+      debug:
+        msg: >-
+          {{ disk_sdc }} →
+          {% if sdc_stat.stat.exists %}✅ DİSK MEVCUT{% else %}❌ DİSK BULUNAMADI!{% endif %}
+
+    - name: "sdc boyutunu oku"
+      command: "lsblk -bno SIZE {{ disk_sdc }}"
+      register: sdc_size
+      changed_when: false
+      when: sdc_stat.stat.exists
+
+    - name: "sdc boyut kontrolü"
+      debug:
+        msg: >-
+          {{ disk_sdc }} →
+          {{ (sdc_size.stdout | int / 1073741824) | round(1) }} GB
+          {% if (sdc_size.stdout | int / 1073741824) >= expected_disk_gb %}✅ Yeterli{% else %}❌ Yetersiz!{% endif %}
+      when: sdc_stat.stat.exists
+
+    - name: "sdc üzerinde mevcut PV/VG kontrolü"
+      command: "pvs --noheadings -o pv_name,vg_name {{ disk_sdc }}"
+      register: sdc_pvs
+      changed_when: false
+      failed_when: false
+      when: sdc_stat.stat.exists
+
+    - name: "sdc PV/VG durumu"
+      debug:
+        msg: >-
+          {{ disk_sdc }} →
+          {% if sdc_pvs.stdout | trim == '' %}✅ Temiz disk{% else %}⚠️  Kullanımda: {{ sdc_pvs.stdout | trim }}{% endif %}
+      when: sdc_stat.stat.exists
+
+    # ---------- Mount noktaları ----------
+    - name: "sdb mount noktalarını kontrol et"
+      command: "mountpoint -q {{ item.mount }}"
+      register: sdb_mount_check
+      changed_when: false
+      failed_when: false
+      loop: "{{ planned_volumes_sdb }}"
+
+    - name: "sdb mount noktası durumları"
+      debug:
+        msg: >-
+          {{ item.item.mount }} →
+          {% if item.rc == 0 %}⚠️  Zaten mount edilmiş!{% else %}✅ Boş{% endif %}
+      loop: "{{ sdb_mount_check.results }}"
+
+    - name: "sdc mount noktalarını kontrol et"
+      command: "mountpoint -q {{ item.mount }}"
+      register: sdc_mount_check
+      changed_when: false
+      failed_when: false
+      loop: "{{ planned_volumes_sdc }}"
+
+    - name: "sdc mount noktası durumları"
+      debug:
+        msg: >-
+          {{ item.item.mount }} →
+          {% if item.rc == 0 %}⚠️  Zaten mount edilmiş!{% else %}✅ Boş{% endif %}
+      loop: "{{ sdc_mount_check.results }}"
+
+    # ---------- Kurulum planı ----------
+    - name: "Kurulum Planı (WORKER — sdb + sdc)"
+      debug:
+        msg:
+          - "══════════════════════════════════════════════════"
+          - "  KURULUM PLANI — {{ inventory_hostname }}"
+          - "══════════════════════════════════════════════════"
+          - "  [ sdb — {{ vg_sdb }} ]"
+          - "  lv_kubelet     | 70 GB    | /var/lib/kubelet    | xfs"
+          - "  lv_containerd  | 110 GB   | /var/lib/containerd | xfs"
+          - "  lv_log         | ~20 GB   | /var/log            | xfs"
+          - "──────────────────────────────────────────────────"
+          - "  [ sdc — {{ vg_sdc }} ]"
+          - "  lv_wal         | 200 GB   | /data/wal           | xfs"
+          - "══════════════════════════════════════════════════"
+
+    # ---------- Mevcut durum ----------
+    - name: "Mevcut disk kullanımı (df -hT)"
+      command: df -hT
+      register: df_out
+      changed_when: false
+
+    - name: "df -hT çıktısı"
+      debug:
+        var: df_out.stdout_lines
+
+    - name: "lsblk — tüm disk yapısı"
+      command: lsblk -o NAME,SIZE,TYPE,MOUNTPOINT,FSTYPE
+      register: lsblk_out
+      changed_when: false
+
+    - name: "lsblk çıktısı"
+      debug:
+        var: lsblk_out.stdout_lines
