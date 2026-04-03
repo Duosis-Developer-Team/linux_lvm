@@ -1,0 +1,153 @@
+---
+# ============================================================
+#  Kubespray Öncesi Son Kontrol
+# ============================================================
+- name: "Kubespray Öncesi Kontrol"
+  hosts: all
+  become: true
+  gather_facts: true
+
+  tasks:
+
+    # ---------- Hostname ----------
+    - name: "FQDN hostname doğrula"
+      command: hostname --fqdn
+      register: fqdn_out
+      changed_when: false
+      failed_when: "'blt.vc' not in fqdn_out.stdout"
+
+    # ---------- DNS çözümleme ----------
+    - name: "VIP DNS çözümle (apmtest.blt.vc)"
+      command: getent hosts apmtest.blt.vc
+      register: dns_vip
+      changed_when: false
+      failed_when: dns_vip.rc != 0
+
+    - name: "Master node'ları çözümle"
+      command: "getent hosts {{ item }}"
+      loop:
+        - apm-test-master01.blt.vc
+        - apm-test-master02.blt.vc
+        - apm-test-master03.blt.vc
+        - apm-test-worker01.blt.vc
+        - apm-test-worker02.blt.vc
+        - apm-test-worker03.blt.vc
+      changed_when: false
+
+    # ---------- Node'lar arası ping ----------
+    - name: "Node'lar arası erişim testi"
+      command: "ping -c 2 -W 2 {{ item }}"
+      loop:
+        - 10.134.16.63
+        - 10.134.16.64
+        - 10.134.16.65
+        - 10.134.16.66
+        - 10.134.16.67
+        - 10.134.16.68
+      changed_when: false
+
+    # ---------- Swap ----------
+    - name: "Swap kapalı mı?"
+      command: swapon --show
+      register: swap_out
+      changed_when: false
+      failed_when: swap_out.stdout | length > 0
+
+    # ---------- Kernel parametreleri ----------
+    - name: "IP forward aktif mi?"
+      command: sysctl net.ipv4.ip_forward
+      register: ipfwd
+      changed_when: false
+      failed_when: "'= 1' not in ipfwd.stdout"
+
+    - name: "br_netfilter aktif mi?"
+      command: sysctl net.bridge.bridge-nf-call-iptables
+      register: brnf
+      changed_when: false
+      failed_when: "'= 1' not in brnf.stdout"
+
+    # ---------- Kernel modülleri ----------
+    - name: "overlay yüklü mü?"
+      shell: lsmod | grep -q overlay
+      changed_when: false
+      failed_when: false
+      register: overlay_mod
+
+    - name: "br_netfilter yüklü mü?"
+      shell: lsmod | grep -q br_netfilter
+      changed_when: false
+      failed_when: false
+      register: brnf_mod
+
+    # ---------- LVM mount'ları ----------
+    - name: "/var/lib/kubelet mount'u"
+      command: mountpoint -q /var/lib/kubelet
+      changed_when: false
+      failed_when: false
+      register: kubelet_mp
+
+    - name: "/var/lib/containerd mount'u"
+      command: mountpoint -q /var/lib/containerd
+      changed_when: false
+      failed_when: false
+      register: containerd_mp
+
+    - name: "/var/log mount'u"
+      command: mountpoint -q /var/log
+      changed_when: false
+      failed_when: false
+      register: log_mp
+
+    # ---------- NTP ----------
+    - name: "NTP senkronizasyon"
+      command: chronyc tracking
+      register: chrony_out
+      changed_when: false
+      failed_when: false
+
+    # ---------- Python ----------
+    - name: "Python3 versiyonu"
+      command: python3 --version
+      register: py_out
+      changed_when: false
+
+    # ---------- Özet rapor ----------
+    - name: "=== KONTROL SONUÇLARI ==="
+      debug:
+        msg:
+          - "HOST         : {{ ansible_hostname }}"
+          - "FQDN         : {{ fqdn_out.stdout }}"
+          - "OS           : {{ ansible_distribution }} {{ ansible_distribution_version }}"
+          - "Kernel       : {{ ansible_kernel }}"
+          - "Python       : {{ py_out.stdout }}"
+          - "Swap         : {{ 'KAPALI ✓' if swap_out.stdout | length == 0 else 'AÇIK ✗ !!!' }}"
+          - "IP Forward   : {{ 'OK ✓' if '= 1' in ipfwd.stdout else 'HATA ✗' }}"
+          - "br_netfilter : {{ 'OK ✓' if '= 1' in brnf.stdout else 'HATA ✗' }}"
+          - "overlay mod  : {{ 'OK ✓' if overlay_mod.rc == 0 else 'YÜKLENMEMİŞ ✗' }}"
+          - "kubelet mp   : {{ 'MOUNT ✓' if kubelet_mp.rc == 0 else 'MOUNT YOK ✗' }}"
+          - "containerd mp: {{ 'MOUNT ✓' if containerd_mp.rc == 0 else 'MOUNT YOK ✗' }}"
+          - "log mp       : {{ 'MOUNT ✓' if log_mp.rc == 0 else 'MOUNT YOK ✗' }}"
+          - "DNS VIP      : {{ 'OK ✓' if dns_vip.rc == 0 else 'ÇÖZÜLMÜYOR ✗' }}"
+
+# ---------- Worker'a özel /data/wal ----------
+- name: "Worker Kontrol - /data/wal"
+  hosts: kube_node
+  become: true
+
+  tasks:
+    - name: "/data/wal mount'u"
+      command: mountpoint -q /data/wal
+      changed_when: false
+      register: wal_mp
+
+    - name: "/data/wal disk durumu"
+      command: df -hT /data/wal
+      register: wal_df
+      changed_when: false
+
+    - name: "=== WORKER /data/wal ==="
+      debug:
+        msg:
+          - "HOST       : {{ ansible_hostname }}"
+          - "WAL mount  : {{ 'MOUNT ✓' if wal_mp.rc == 0 else 'MOUNT YOK ✗' }}"
+          - "WAL disk   : {{ wal_df.stdout_lines }}"
