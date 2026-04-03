@@ -1,0 +1,219 @@
+---
+# ============================================================
+#  LVM + Filesystem + Mount Playbook
+#  Master ve Worker node'lar için ayrı disk yapılandırması
+# ============================================================
+
+# ============================================================
+# MASTER NODES — sdb (200 GB)
+#   /var/lib/kubelet     xfs  70 GB
+#   /var/lib/containerd  xfs  110 GB
+#   /var/log             xfs  kalan alan
+# ============================================================
+- name: Master Node - LVM ve Filesystem Kurulumu (sdb)
+  hosts: masters
+  become: true
+  vars:
+    disk_sdb: /dev/sdb
+    vg_name: vg_sdb
+
+    lvm_volumes_sdb:
+      - lv: lv_kubelet
+        size: "70g"
+        mount: /var/lib/kubelet
+        fstype: xfs
+
+      - lv: lv_containerd
+        size: "110g"
+        mount: /var/lib/containerd
+        fstype: xfs
+
+      - lv: lv_log
+        size: "100%FREE"
+        mount: /var/log
+        fstype: xfs
+
+  tasks:
+
+    - name: "{{ disk_sdb }} diskinde mevcut partition var mı kontrol et"
+      command: "lsblk -no PARTTYPE {{ disk_sdb }}"
+      register: sdb_check
+      changed_when: false
+      ignore_errors: true
+
+    - name: "{{ vg_name }} Volume Group oluştur (sdb)"
+      community.general.lvg:
+        vg: "{{ vg_name }}"
+        pvs: "{{ disk_sdb }}"
+        state: present
+
+    - name: "Logical Volume'lar oluştur (sdb)"
+      community.general.lvol:
+        vg: "{{ vg_name }}"
+        lv: "{{ item.lv }}"
+        size: "{{ item.size }}"
+        state: present
+        force: false
+      loop: "{{ lvm_volumes_sdb }}"
+
+    - name: "XFS Filesystem oluştur (sdb)"
+      community.general.filesystem:
+        fstype: "{{ item.fstype }}"
+        dev: "/dev/{{ vg_name }}/{{ item.lv }}"
+        force: false
+      loop: "{{ lvm_volumes_sdb }}"
+
+    - name: "Mount noktaları oluştur (sdb)"
+      file:
+        path: "{{ item.mount }}"
+        state: directory
+        mode: "0755"
+      loop: "{{ lvm_volumes_sdb }}"
+
+    - name: "/etc/fstab'a ekle ve mount et (sdb)"
+      mount:
+        path: "{{ item.mount }}"
+        src: "/dev/{{ vg_name }}/{{ item.lv }}"
+        fstype: "{{ item.fstype }}"
+        opts: defaults
+        state: mounted
+      loop: "{{ lvm_volumes_sdb }}"
+
+    - name: "Mount durumunu doğrula (sdb)"
+      command: df -hT
+      register: df_output
+      changed_when: false
+
+    - name: "Disk durumu"
+      debug:
+        var: df_output.stdout_lines
+
+
+# ============================================================
+# WORKER NODES — sdb (200 GB) + sdc (200 GB)
+#   sdb:
+#     /var/lib/kubelet     xfs  70 GB
+#     /var/lib/containerd  xfs  110 GB
+#     /var/log             xfs  kalan alan
+#   sdc:
+#     /data/wal            xfs  tüm alan
+# ============================================================
+- name: Worker Node - LVM ve Filesystem Kurulumu (sdb + sdc)
+  hosts: workers
+  become: true
+  vars:
+    disk_sdb: /dev/sdb
+    disk_sdc: /dev/sdc
+    vg_sdb: vg_sdb
+    vg_sdc: vg_sdc
+
+    lvm_volumes_sdb:
+      - lv: lv_kubelet
+        size: "70g"
+        mount: /var/lib/kubelet
+        fstype: xfs
+
+      - lv: lv_containerd
+        size: "110g"
+        mount: /var/lib/containerd
+        fstype: xfs
+
+      - lv: lv_log
+        size: "100%FREE"
+        mount: /var/log
+        fstype: xfs
+
+    lvm_volumes_sdc:
+      - lv: lv_wal
+        size: "100%FREE"
+        mount: /data/wal
+        fstype: xfs
+
+  tasks:
+
+    # ---------- sdb ----------
+    - name: "{{ vg_sdb }} Volume Group oluştur (sdb)"
+      community.general.lvg:
+        vg: "{{ vg_sdb }}"
+        pvs: "{{ disk_sdb }}"
+        state: present
+
+    - name: "Logical Volume'lar oluştur (sdb)"
+      community.general.lvol:
+        vg: "{{ vg_sdb }}"
+        lv: "{{ item.lv }}"
+        size: "{{ item.size }}"
+        state: present
+        force: false
+      loop: "{{ lvm_volumes_sdb }}"
+
+    - name: "XFS Filesystem oluştur (sdb)"
+      community.general.filesystem:
+        fstype: "{{ item.fstype }}"
+        dev: "/dev/{{ vg_sdb }}/{{ item.lv }}"
+        force: false
+      loop: "{{ lvm_volumes_sdb }}"
+
+    - name: "Mount noktaları oluştur (sdb)"
+      file:
+        path: "{{ item.mount }}"
+        state: directory
+        mode: "0755"
+      loop: "{{ lvm_volumes_sdb }}"
+
+    - name: "/etc/fstab'a ekle ve mount et (sdb)"
+      mount:
+        path: "{{ item.mount }}"
+        src: "/dev/{{ vg_sdb }}/{{ item.lv }}"
+        fstype: "{{ item.fstype }}"
+        opts: defaults
+        state: mounted
+      loop: "{{ lvm_volumes_sdb }}"
+
+    # ---------- sdc ----------
+    - name: "{{ vg_sdc }} Volume Group oluştur (sdc)"
+      community.general.lvg:
+        vg: "{{ vg_sdc }}"
+        pvs: "{{ disk_sdc }}"
+        state: present
+
+    - name: "Logical Volume oluştur (sdc)"
+      community.general.lvol:
+        vg: "{{ vg_sdc }}"
+        lv: "{{ item.lv }}"
+        size: "{{ item.size }}"
+        state: present
+        force: false
+      loop: "{{ lvm_volumes_sdc }}"
+
+    - name: "XFS Filesystem oluştur (sdc)"
+      community.general.filesystem:
+        fstype: "{{ item.fstype }}"
+        dev: "/dev/{{ vg_sdc }}/{{ item.lv }}"
+        force: false
+      loop: "{{ lvm_volumes_sdc }}"
+
+    - name: "Mount noktaları oluştur (sdc)"
+      file:
+        path: "{{ item.mount }}"
+        state: directory
+        mode: "0755"
+      loop: "{{ lvm_volumes_sdc }}"
+
+    - name: "/etc/fstab'a ekle ve mount et (sdc)"
+      mount:
+        path: "{{ item.mount }}"
+        src: "/dev/{{ vg_sdc }}/{{ item.lv }}"
+        fstype: "{{ item.fstype }}"
+        opts: defaults
+        state: mounted
+      loop: "{{ lvm_volumes_sdc }}"
+
+    - name: "Mount durumunu doğrula (tüm diskler)"
+      command: df -hT
+      register: df_output
+      changed_when: false
+
+    - name: "Disk durumu"
+      debug:
+        var: df_output.stdout_lines
