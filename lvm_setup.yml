@@ -1,219 +1,265 @@
 ---
 # ============================================================
 #  LVM + Filesystem + Mount Playbook
-#  Master ve Worker node'lar için ayrı disk yapılandırması
+#  community.general kullanmadan — shell komutlarıyla
 # ============================================================
 
 # ============================================================
 # MASTER NODES — sdb (200 GB)
-#   /var/lib/kubelet     xfs  70 GB
-#   /var/lib/containerd  xfs  110 GB
-#   /var/log             xfs  kalan alan
 # ============================================================
-- name: Master Node - LVM ve Filesystem Kurulumu (sdb)
+- name: "Master Node - LVM ve Filesystem Kurulumu (sdb)"
   hosts: masters
   become: true
+
   vars:
     disk_sdb: /dev/sdb
     vg_name: vg_sdb
 
-    lvm_volumes_sdb:
-      - lv: lv_kubelet
-        size: "70g"
-        mount: /var/lib/kubelet
-        fstype: xfs
-
-      - lv: lv_containerd
-        size: "110g"
-        mount: /var/lib/containerd
-        fstype: xfs
-
-      - lv: lv_log
-        size: "100%FREE"
-        mount: /var/log
-        fstype: xfs
-
   tasks:
 
-    - name: "{{ disk_sdb }} diskinde mevcut partition var mı kontrol et"
-      command: "lsblk -no PARTTYPE {{ disk_sdb }}"
-      register: sdb_check
-      changed_when: false
-      ignore_errors: true
+    # ---------- PV + VG ----------
+    - name: "PV oluştur (sdb)"
+      command: "pvcreate {{ disk_sdb }}"
+      register: pvcreate_out
+      failed_when: pvcreate_out.rc != 0 and 'already exists' not in pvcreate_out.stderr
+      changed_when: pvcreate_out.rc == 0
 
-    - name: "{{ vg_name }} Volume Group oluştur (sdb)"
-      community.general.lvg:
-        vg: "{{ vg_name }}"
-        pvs: "{{ disk_sdb }}"
-        state: present
+    - name: "VG oluştur (sdb)"
+      command: "vgcreate {{ vg_name }} {{ disk_sdb }}"
+      register: vgcreate_out
+      failed_when: vgcreate_out.rc != 0 and 'already exists' not in vgcreate_out.stderr
+      changed_when: vgcreate_out.rc == 0
 
-    - name: "Logical Volume'lar oluştur (sdb)"
-      community.general.lvol:
-        vg: "{{ vg_name }}"
-        lv: "{{ item.lv }}"
-        size: "{{ item.size }}"
-        state: present
-        force: false
-      loop: "{{ lvm_volumes_sdb }}"
+    # ---------- LV'ler ----------
+    - name: "lv_kubelet oluştur (70 GB)"
+      command: "lvcreate -L 70G -n lv_kubelet {{ vg_name }}"
+      register: lv_kubelet
+      failed_when: lv_kubelet.rc != 0 and 'already exists' not in lv_kubelet.stderr
+      changed_when: lv_kubelet.rc == 0
 
-    - name: "XFS Filesystem oluştur (sdb)"
-      community.general.filesystem:
-        fstype: "{{ item.fstype }}"
-        dev: "/dev/{{ vg_name }}/{{ item.lv }}"
-        force: false
-      loop: "{{ lvm_volumes_sdb }}"
+    - name: "lv_containerd oluştur (110 GB)"
+      command: "lvcreate -L 110G -n lv_containerd {{ vg_name }}"
+      register: lv_containerd
+      failed_when: lv_containerd.rc != 0 and 'already exists' not in lv_containerd.stderr
+      changed_when: lv_containerd.rc == 0
 
-    - name: "Mount noktaları oluştur (sdb)"
+    - name: "lv_log oluştur (kalan alan)"
+      command: "lvcreate -l 100%FREE -n lv_log {{ vg_name }}"
+      register: lv_log
+      failed_when: lv_log.rc != 0 and 'already exists' not in lv_log.stderr
+      changed_when: lv_log.rc == 0
+
+    # ---------- Filesystem ----------
+    - name: "lv_kubelet XFS formatla"
+      command: "mkfs.xfs /dev/{{ vg_name }}/lv_kubelet"
+      register: mkfs_kubelet
+      failed_when: mkfs_kubelet.rc != 0 and 'already contains' not in mkfs_kubelet.stderr
+      changed_when: mkfs_kubelet.rc == 0
+
+    - name: "lv_containerd XFS formatla"
+      command: "mkfs.xfs /dev/{{ vg_name }}/lv_containerd"
+      register: mkfs_containerd
+      failed_when: mkfs_containerd.rc != 0 and 'already contains' not in mkfs_containerd.stderr
+      changed_when: mkfs_containerd.rc == 0
+
+    - name: "lv_log XFS formatla"
+      command: "mkfs.xfs /dev/{{ vg_name }}/lv_log"
+      register: mkfs_log
+      failed_when: mkfs_log.rc != 0 and 'already contains' not in mkfs_log.stderr
+      changed_when: mkfs_log.rc == 0
+
+    # ---------- Mount noktaları ----------
+    - name: "Mount noktası klasörleri oluştur"
       file:
-        path: "{{ item.mount }}"
+        path: "{{ item }}"
         state: directory
         mode: "0755"
-      loop: "{{ lvm_volumes_sdb }}"
+      loop:
+        - /var/lib/kubelet
+        - /var/lib/containerd
+        - /var/log
 
-    - name: "/etc/fstab'a ekle ve mount et (sdb)"
+    # ---------- fstab + mount ----------
+    - name: "fstab — lv_kubelet"
       mount:
-        path: "{{ item.mount }}"
-        src: "/dev/{{ vg_name }}/{{ item.lv }}"
-        fstype: "{{ item.fstype }}"
+        path: /var/lib/kubelet
+        src: "/dev/{{ vg_name }}/lv_kubelet"
+        fstype: xfs
         opts: defaults
         state: mounted
-      loop: "{{ lvm_volumes_sdb }}"
 
-    - name: "Mount durumunu doğrula (sdb)"
+    - name: "fstab — lv_containerd"
+      mount:
+        path: /var/lib/containerd
+        src: "/dev/{{ vg_name }}/lv_containerd"
+        fstype: xfs
+        opts: defaults
+        state: mounted
+
+    - name: "fstab — lv_log"
+      mount:
+        path: /var/log
+        src: "/dev/{{ vg_name }}/lv_log"
+        fstype: xfs
+        opts: defaults
+        state: mounted
+
+    # ---------- Doğrulama ----------
+    - name: "Sonuç — df -hT"
       command: df -hT
-      register: df_output
+      register: df_out
       changed_when: false
 
     - name: "Disk durumu"
       debug:
-        var: df_output.stdout_lines
+        var: df_out.stdout_lines
 
 
 # ============================================================
 # WORKER NODES — sdb (200 GB) + sdc (200 GB)
-#   sdb:
-#     /var/lib/kubelet     xfs  70 GB
-#     /var/lib/containerd  xfs  110 GB
-#     /var/log             xfs  kalan alan
-#   sdc:
-#     /data/wal            xfs  tüm alan
 # ============================================================
-- name: Worker Node - LVM ve Filesystem Kurulumu (sdb + sdc)
+- name: "Worker Node - LVM ve Filesystem Kurulumu (sdb + sdc)"
   hosts: workers
   become: true
+
   vars:
     disk_sdb: /dev/sdb
     disk_sdc: /dev/sdc
     vg_sdb: vg_sdb
     vg_sdc: vg_sdc
 
-    lvm_volumes_sdb:
-      - lv: lv_kubelet
-        size: "70g"
-        mount: /var/lib/kubelet
-        fstype: xfs
-
-      - lv: lv_containerd
-        size: "110g"
-        mount: /var/lib/containerd
-        fstype: xfs
-
-      - lv: lv_log
-        size: "100%FREE"
-        mount: /var/log
-        fstype: xfs
-
-    lvm_volumes_sdc:
-      - lv: lv_wal
-        size: "100%FREE"
-        mount: /data/wal
-        fstype: xfs
-
   tasks:
 
-    # ---------- sdb ----------
-    - name: "{{ vg_sdb }} Volume Group oluştur (sdb)"
-      community.general.lvg:
-        vg: "{{ vg_sdb }}"
-        pvs: "{{ disk_sdb }}"
-        state: present
+    # ===== sdb =====
 
-    - name: "Logical Volume'lar oluştur (sdb)"
-      community.general.lvol:
-        vg: "{{ vg_sdb }}"
-        lv: "{{ item.lv }}"
-        size: "{{ item.size }}"
-        state: present
-        force: false
-      loop: "{{ lvm_volumes_sdb }}"
+    - name: "PV oluştur (sdb)"
+      command: "pvcreate {{ disk_sdb }}"
+      register: pvcreate_sdb
+      failed_when: pvcreate_sdb.rc != 0 and 'already exists' not in pvcreate_sdb.stderr
+      changed_when: pvcreate_sdb.rc == 0
 
-    - name: "XFS Filesystem oluştur (sdb)"
-      community.general.filesystem:
-        fstype: "{{ item.fstype }}"
-        dev: "/dev/{{ vg_sdb }}/{{ item.lv }}"
-        force: false
-      loop: "{{ lvm_volumes_sdb }}"
+    - name: "VG oluştur (sdb)"
+      command: "vgcreate {{ vg_sdb }} {{ disk_sdb }}"
+      register: vgcreate_sdb
+      failed_when: vgcreate_sdb.rc != 0 and 'already exists' not in vgcreate_sdb.stderr
+      changed_when: vgcreate_sdb.rc == 0
 
-    - name: "Mount noktaları oluştur (sdb)"
+    - name: "lv_kubelet oluştur (70 GB)"
+      command: "lvcreate -L 70G -n lv_kubelet {{ vg_sdb }}"
+      register: lv_kubelet
+      failed_when: lv_kubelet.rc != 0 and 'already exists' not in lv_kubelet.stderr
+      changed_when: lv_kubelet.rc == 0
+
+    - name: "lv_containerd oluştur (110 GB)"
+      command: "lvcreate -L 110G -n lv_containerd {{ vg_sdb }}"
+      register: lv_containerd
+      failed_when: lv_containerd.rc != 0 and 'already exists' not in lv_containerd.stderr
+      changed_when: lv_containerd.rc == 0
+
+    - name: "lv_log oluştur (kalan alan)"
+      command: "lvcreate -l 100%FREE -n lv_log {{ vg_sdb }}"
+      register: lv_log
+      failed_when: lv_log.rc != 0 and 'already exists' not in lv_log.stderr
+      changed_when: lv_log.rc == 0
+
+    - name: "lv_kubelet XFS formatla"
+      command: "mkfs.xfs /dev/{{ vg_sdb }}/lv_kubelet"
+      register: mkfs_kubelet
+      failed_when: mkfs_kubelet.rc != 0 and 'already contains' not in mkfs_kubelet.stderr
+      changed_when: mkfs_kubelet.rc == 0
+
+    - name: "lv_containerd XFS formatla"
+      command: "mkfs.xfs /dev/{{ vg_sdb }}/lv_containerd"
+      register: mkfs_containerd
+      failed_when: mkfs_containerd.rc != 0 and 'already contains' not in mkfs_containerd.stderr
+      changed_when: mkfs_containerd.rc == 0
+
+    - name: "lv_log XFS formatla"
+      command: "mkfs.xfs /dev/{{ vg_sdb }}/lv_log"
+      register: mkfs_log
+      failed_when: mkfs_log.rc != 0 and 'already contains' not in mkfs_log.stderr
+      changed_when: mkfs_log.rc == 0
+
+    - name: "Mount noktası klasörleri oluştur (sdb)"
       file:
-        path: "{{ item.mount }}"
+        path: "{{ item }}"
         state: directory
         mode: "0755"
-      loop: "{{ lvm_volumes_sdb }}"
+      loop:
+        - /var/lib/kubelet
+        - /var/lib/containerd
+        - /var/log
 
-    - name: "/etc/fstab'a ekle ve mount et (sdb)"
+    - name: "fstab — lv_kubelet"
       mount:
-        path: "{{ item.mount }}"
-        src: "/dev/{{ vg_sdb }}/{{ item.lv }}"
-        fstype: "{{ item.fstype }}"
+        path: /var/lib/kubelet
+        src: "/dev/{{ vg_sdb }}/lv_kubelet"
+        fstype: xfs
         opts: defaults
         state: mounted
-      loop: "{{ lvm_volumes_sdb }}"
 
-    # ---------- sdc ----------
-    - name: "{{ vg_sdc }} Volume Group oluştur (sdc)"
-      community.general.lvg:
-        vg: "{{ vg_sdc }}"
-        pvs: "{{ disk_sdc }}"
-        state: present
+    - name: "fstab — lv_containerd"
+      mount:
+        path: /var/lib/containerd
+        src: "/dev/{{ vg_sdb }}/lv_containerd"
+        fstype: xfs
+        opts: defaults
+        state: mounted
 
-    - name: "Logical Volume oluştur (sdc)"
-      community.general.lvol:
-        vg: "{{ vg_sdc }}"
-        lv: "{{ item.lv }}"
-        size: "{{ item.size }}"
-        state: present
-        force: false
-      loop: "{{ lvm_volumes_sdc }}"
+    - name: "fstab — lv_log"
+      mount:
+        path: /var/log
+        src: "/dev/{{ vg_sdb }}/lv_log"
+        fstype: xfs
+        opts: defaults
+        state: mounted
 
-    - name: "XFS Filesystem oluştur (sdc)"
-      community.general.filesystem:
-        fstype: "{{ item.fstype }}"
-        dev: "/dev/{{ vg_sdc }}/{{ item.lv }}"
-        force: false
-      loop: "{{ lvm_volumes_sdc }}"
+    # ===== sdc =====
 
-    - name: "Mount noktaları oluştur (sdc)"
+    - name: "PV oluştur (sdc)"
+      command: "pvcreate {{ disk_sdc }}"
+      register: pvcreate_sdc
+      failed_when: pvcreate_sdc.rc != 0 and 'already exists' not in pvcreate_sdc.stderr
+      changed_when: pvcreate_sdc.rc == 0
+
+    - name: "VG oluştur (sdc)"
+      command: "vgcreate {{ vg_sdc }} {{ disk_sdc }}"
+      register: vgcreate_sdc
+      failed_when: vgcreate_sdc.rc != 0 and 'already exists' not in vgcreate_sdc.stderr
+      changed_when: vgcreate_sdc.rc == 0
+
+    - name: "lv_wal oluştur (tüm alan)"
+      command: "lvcreate -l 100%FREE -n lv_wal {{ vg_sdc }}"
+      register: lv_wal
+      failed_when: lv_wal.rc != 0 and 'already exists' not in lv_wal.stderr
+      changed_when: lv_wal.rc == 0
+
+    - name: "lv_wal XFS formatla"
+      command: "mkfs.xfs /dev/{{ vg_sdc }}/lv_wal"
+      register: mkfs_wal
+      failed_when: mkfs_wal.rc != 0 and 'already contains' not in mkfs_wal.stderr
+      changed_when: mkfs_wal.rc == 0
+
+    - name: "Mount noktası oluştur (sdc)"
       file:
-        path: "{{ item.mount }}"
+        path: /data/wal
         state: directory
         mode: "0755"
-      loop: "{{ lvm_volumes_sdc }}"
 
-    - name: "/etc/fstab'a ekle ve mount et (sdc)"
+    - name: "fstab — lv_wal"
       mount:
-        path: "{{ item.mount }}"
-        src: "/dev/{{ vg_sdc }}/{{ item.lv }}"
-        fstype: "{{ item.fstype }}"
+        path: /data/wal
+        src: "/dev/{{ vg_sdc }}/lv_wal"
+        fstype: xfs
         opts: defaults
         state: mounted
-      loop: "{{ lvm_volumes_sdc }}"
 
-    - name: "Mount durumunu doğrula (tüm diskler)"
+    # ---------- Doğrulama ----------
+    - name: "Sonuç — df -hT"
       command: df -hT
-      register: df_output
+      register: df_out
       changed_when: false
 
     - name: "Disk durumu"
       debug:
-        var: df_output.stdout_lines
+        var: df_out.stdout_lines
