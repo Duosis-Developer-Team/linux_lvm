@@ -1,0 +1,354 @@
+---
+# ============================================================
+#  Kubernetes (Kubespray) Ön Gereksinim Playbook
+#  Hedef: 3 Master + 3 Worker
+#  Not: LVM kurulumu (lvm_setup.yml) önceden tamamlanmış olmalı
+#  Not: NGINX Ingress desteklenmiyor → HAProxy Ingress kullanılacak
+# ============================================================
+
+# ============================================================
+# 1. TÜM NODELAR — Temel sistem hazırlığı
+# ============================================================
+- name: "Tüm Nodelar - Temel Hazırlık"
+  hosts: all
+  become: true
+
+  vars:
+    k8s_vip: "192.168.1.100"           # Virtual IP adresin
+    k8s_dns: "k8s.example.com"         # DNS kaydın
+    ntp_server: "pool.ntp.org"
+
+    hosts_entries:
+      - { ip: "192.168.1.10", name: "master-1" }
+      - { ip: "192.168.1.11", name: "master-2" }
+      - { ip: "192.168.1.12", name: "master-3" }
+      - { ip: "192.168.1.20", name: "worker-1" }
+      - { ip: "192.168.1.21", name: "worker-2" }
+      - { ip: "192.168.1.22", name: "worker-3" }
+      - { ip: "{{ k8s_vip }}",  name: "{{ k8s_dns }}" }
+
+  tasks:
+
+    # ---------- Paket güncellemesi ----------
+    - name: "APT cache güncelle"
+      apt:
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: "Temel paketleri kur"
+      apt:
+        name:
+          - curl
+          - wget
+          - git
+          - vim
+          - htop
+          - net-tools
+          - ipvsadm
+          - ipset
+          - socat
+          - conntrack
+          - ebtables
+          - ethtool
+          - lvm2
+          - chrony
+          - python3
+          - python3-pip
+          - ca-certificates
+          - apt-transport-https
+          - gnupg
+        state: present
+
+    # ---------- /etc/hosts ----------
+    - name: "/etc/hosts — cluster entry'leri ekle"
+      lineinfile:
+        path: /etc/hosts
+        line: "{{ item.ip }}  {{ item.name }}"
+        state: present
+        regexp: ".*{{ item.name }}$"
+      loop: "{{ hosts_entries }}"
+
+    # ---------- Hostname ----------
+    - name: "Hostname ayarla"
+      hostname:
+        name: "{{ inventory_hostname }}"
+
+    # ---------- Swap KAPAT ----------
+    - name: "Swap kapat (runtime)"
+      command: swapoff -a
+      changed_when: false
+
+    - name: "Swap kapat (fstab)"
+      replace:
+        path: /etc/fstab
+        regexp: '^([^#].*\s+swap\s+.*)$'
+        replace: '# \1'
+
+    - name: "Swap kapalı doğrula"
+      command: swapon --show
+      register: swap_check
+      changed_when: false
+      failed_when: swap_check.stdout | length > 0
+
+    # ---------- Firewall KAPAT ----------
+    - name: "UFW durdur ve devre dışı bırak"
+      service:
+        name: ufw
+        state: stopped
+        enabled: false
+      ignore_errors: true
+
+    - name: "UFW kaldır"
+      apt:
+        name: ufw
+        state: absent
+      ignore_errors: true
+
+    # ---------- Kernel Modülleri ----------
+    - name: "Kernel modül dosyası oluştur"
+      copy:
+        dest: /etc/modules-load.d/k8s.conf
+        content: |
+          overlay
+          br_netfilter
+          ip_vs
+          ip_vs_rr
+          ip_vs_wrr
+          ip_vs_sh
+          nf_conntrack
+        mode: "0644"
+
+    - name: "Kernel modüllerini yükle"
+      modprobe:
+        name: "{{ item }}"
+        state: present
+      loop:
+        - overlay
+        - br_netfilter
+        - ip_vs
+        - ip_vs_rr
+        - ip_vs_wrr
+        - ip_vs_sh
+        - nf_conntrack
+
+    # ---------- Sysctl ----------
+    - name: "Kubernetes sysctl parametreleri"
+      copy:
+        dest: /etc/sysctl.d/99-k8s.conf
+        content: |
+          # Kubernetes gereksinimleri
+          net.bridge.bridge-nf-call-iptables  = 1
+          net.bridge.bridge-nf-call-ip6tables = 1
+          net.ipv4.ip_forward                 = 1
+          net.ipv6.conf.all.forwarding        = 1
+
+          # IPVS için
+          net.ipv4.vs.conntrack               = 1
+
+          # Performans
+          fs.inotify.max_user_instances       = 8192
+          fs.inotify.max_user_watches         = 524288
+          fs.file-max                         = 2097152
+          vm.max_map_count                    = 262144
+          kernel.pid_max                      = 4194304
+
+          # Network
+          net.core.somaxconn                  = 32768
+          net.ipv4.tcp_max_syn_backlog        = 8096
+        mode: "0644"
+
+    - name: "Sysctl uygula"
+      command: sysctl --system
+      changed_when: false
+
+    # ---------- NTP / Chrony ----------
+    - name: "Chrony konfigürasyon"
+      copy:
+        dest: /etc/chrony/chrony.conf
+        content: |
+          pool {{ ntp_server }} iburst maxsources 4
+          driftfile /var/lib/chrony/drift
+          makestep 1.0 3
+          rtcsync
+          logdir /var/log/chrony
+        mode: "0644"
+      notify: restart chrony
+
+    - name: "Chrony başlat ve enable et"
+      service:
+        name: chrony
+        state: started
+        enabled: true
+
+    # ---------- /var/log mount doğrulama ----------
+    - name: "/var/log mount durumunu kontrol et"
+      command: mountpoint -q /var/log
+      register: log_mount
+      changed_when: false
+      failed_when: log_mount.rc != 0
+
+    - name: "/var/lib/kubelet mount durumunu kontrol et"
+      command: mountpoint -q /var/lib/kubelet
+      register: kubelet_mount
+      changed_when: false
+      failed_when: kubelet_mount.rc != 0
+
+    - name: "/var/lib/containerd mount durumunu kontrol et"
+      command: mountpoint -q /var/lib/containerd
+      register: containerd_mount
+      changed_when: false
+      failed_when: containerd_mount.rc != 0
+
+    # ---------- Gerekli dizinler ----------
+    - name: "Kubelet servis dizini oluştur"
+      file:
+        path: /etc/systemd/system/kubelet.service.d
+        state: directory
+        mode: "0755"
+
+    - name: "/opt/cni/bin dizini oluştur"
+      file:
+        path: /opt/cni/bin
+        state: directory
+        mode: "0755"
+
+    - name: "/etc/cni/net.d dizini oluştur"
+      file:
+        path: /etc/cni/net.d
+        state: directory
+        mode: "0755"
+
+  handlers:
+    - name: restart chrony
+      service:
+        name: chrony
+        state: restarted
+
+
+# ============================================================
+# 2. WORKER NODELAR — Ek disk doğrulama (/data/wal)
+# ============================================================
+- name: "Worker Nodelar - /data/wal Doğrulama"
+  hosts: kube_node
+  become: true
+
+  tasks:
+
+    - name: "/data/wal mount durumunu kontrol et"
+      command: mountpoint -q /data/wal
+      register: wal_mount
+      changed_when: false
+      failed_when: wal_mount.rc != 0
+
+    - name: "/data/wal dizin izinleri"
+      file:
+        path: /data/wal
+        state: directory
+        mode: "0755"
+        owner: root
+        group: root
+
+    - name: "/data/wal disk bilgisi"
+      command: df -hT /data/wal
+      register: wal_df
+      changed_when: false
+
+    - name: "/data/wal durumu"
+      debug:
+        var: wal_df.stdout_lines
+
+
+# ============================================================
+# 3. MASTER NODELAR — etcd için ek hazırlık
+# ============================================================
+- name: "Master Nodelar - etcd Hazırlığı"
+  hosts: kube_control_plane
+  become: true
+
+  tasks:
+
+    - name: "etcd veri dizini oluştur"
+      file:
+        path: /var/lib/etcd
+        state: directory
+        mode: "0700"
+        owner: root
+        group: root
+
+    - name: "etcd için ulimit ayarları"
+      copy:
+        dest: /etc/security/limits.d/etcd.conf
+        content: |
+          * soft nofile 65536
+          * hard nofile 65536
+          * soft nproc  65536
+          * hard nproc  65536
+        mode: "0644"
+
+
+# ============================================================
+# 4. DOĞRULAMA — Tüm hazırlıklar tamamlandı mı?
+# ============================================================
+- name: "Doğrulama - Ön Gereksinimler"
+  hosts: all
+  become: true
+
+  tasks:
+
+    - name: "Swap kapalı mı?"
+      command: swapon --show
+      register: swap_final
+      changed_when: false
+      failed_when: swap_final.stdout | length > 0
+
+    - name: "IP forward aktif mi?"
+      command: sysctl net.ipv4.ip_forward
+      register: ip_fwd
+      changed_when: false
+      failed_when: "'= 1' not in ip_fwd.stdout"
+
+    - name: "overlay modülü yüklü mü?"
+      command: lsmod
+      register: lsmod_out
+      changed_when: false
+      failed_when: "'overlay' not in lsmod_out.stdout"
+
+    - name: "br_netfilter modülü yüklü mü?"
+      command: lsmod
+      register: lsmod_bf
+      changed_when: false
+      failed_when: "'br_netfilter' not in lsmod_bf.stdout"
+
+    - name: "Chrony senkronizasyon durumu"
+      command: chronyc tracking
+      register: chrony_status
+      changed_when: false
+
+    - name: "NTP durumu"
+      debug:
+        var: chrony_status.stdout_lines
+
+    - name: "Disk mount özeti"
+      command: df -hT
+      register: df_final
+      changed_when: false
+
+    - name: "Mount özeti"
+      debug:
+        var: df_final.stdout_lines
+
+    - name: "Network bağlantı testi (VIP)"
+      command: "ping -c 2 {{ hostvars[inventory_hostname]['ansible_default_ipv4']['address'] }}"
+      register: ping_test
+      changed_when: false
+      ignore_errors: true
+
+    - name: "Sistem bilgisi özeti"
+      debug:
+        msg:
+          - "Hostname   : {{ ansible_hostname }}"
+          - "OS         : {{ ansible_distribution }} {{ ansible_distribution_version }}"
+          - "Kernel     : {{ ansible_kernel }}"
+          - "CPU        : {{ ansible_processor_vcpus }} vCPU"
+          - "RAM        : {{ (ansible_memtotal_mb / 1024) | round(1) }} GB"
+          - "IP         : {{ ansible_default_ipv4.address }}"
