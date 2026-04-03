@@ -119,9 +119,10 @@
         mode: "0644"
 
     - name: "Kernel modüllerini yükle"
-      modprobe:
-        name: "{{ item }}"
-        state: present
+      shell: |
+        modprobe {{ item }} || true
+      register: modprobe_out
+      changed_when: modprobe_out.rc == 0
       loop:
         - overlay
         - br_netfilter
